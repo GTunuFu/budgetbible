@@ -1,0 +1,140 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f5f2ea;
+  --card: #fffdf8;
+  --ink: #1c1b18;
+  --muted: #75716a;
+  --line: #e3ddd0;
+  --accent: #1f5c45;
+  --accent-soft: #dfeae3;
+  --bad: #b0412e;
+  --bad-soft: #f6e1dc;
+  --warn: #a8711a;
+  --warn-soft: #f5e9d2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #121210;
+    --card: #1c1b18;
+    --ink: #eeebe3;
+    --muted: #9a958b;
+    --line: #2e2c27;
+    --accent: #6fbf98;
+    --accent-soft: #1d3329;
+    --bad: #e2836f;
+    --bad-soft: #3a211b;
+    --warn: #e0ae5b;
+    --warn-soft: #362a16;
+  }
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-card: var(--card);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: ui-serif, "New York", "Iowan Old Style", Georgia, "Times New Roman", serif;
+}
+
+html {
+  background: var(--paper);
+  color: var(--ink);
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background: var(--paper);
+  font-family: var(--font-sans);
+  min-height: 100dvh;
+  overscroll-behavior-y: none;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.figure {
+  font-family: var(--font-serif);
+  font-variant-numeric: tabular-nums lining-nums;
+  letter-spacing: -0.02em;
+}
+
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+}
+
+.field {
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 16px; /* prevents iOS zoom */
+  color: var(--ink);
+}
+.field:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 12px;
+  padding: 10px 16px;
+  font-weight: 600;
+  font-size: 15px;
+  background: var(--ink);
+  color: var(--paper);
+}
+.btn:disabled {
+  opacity: 0.5;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 14px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  white-space: nowrap;
+}
+.chip[data-on="true"] {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.safe-bottom {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 76px);
+}
