@@ -52,9 +52,8 @@ export default async function ReviewPage() {
 
   const usageOrder = new Map(usage.map((u, i) => [u.category, i]));
   const categories = cats
-    .filter((c) => c.kind !== "income" || true)
-    .map((c) => ({ name: c.name, kind: c.kind }))
-    .sort((a, b) => (usageOrder.get(a.name) ?? 999) - (usageOrder.get(b.name) ?? 999));
+    .map((c) => ({ name: c.name, kind: c.kind, taxable: c.taxable }))
+    .sort((a, b) => (usageOrder.get(a.name) ?? 999) - (usageOrder.get(b.name) ?? 999) || a.name.localeCompare(b.name));
 
   return (
     <main>

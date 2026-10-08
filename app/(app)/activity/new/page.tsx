@@ -24,10 +24,8 @@ export default async function NewTx({ searchParams }: { searchParams: Promise<{ 
           <input name="description" className="field" placeholder="e.g. Pho Today" required />
         </label>
         <label className="block"><span className="text-xs text-muted block mb-1">Category</span>
-          <select name="category" className="field" defaultValue="">
-            <option value="">Decide later</option>
-            {cats.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-          </select>
+          <input name="category" list="cats" className="field" placeholder="Pick, type a new one, or leave blank" autoComplete="off" />
+          <datalist id="cats">{cats.filter((c) => c.kind !== "transfer").map((c) => <option key={c.name} value={c.name} />)}</datalist>
         </label>
         <div className="grid grid-cols-2 gap-3">
           <label className="block"><span className="text-xs text-muted block mb-1">Date</span>

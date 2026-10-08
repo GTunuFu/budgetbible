@@ -17,7 +17,7 @@ function monthName(offset: number) {
 }
 
 export default function Planner(props: {
-  debts: D[]; income: number; otherFixed: number; recurring: number; avgSpending: number; currentDebtPayment: number;
+  debts: D[]; income: number; incomeBasis: string; otherFixed: number; recurring: number; avgSpending: number; currentDebtPayment: number;
 }) {
   const { income, otherFixed, recurring, currentDebtPayment } = props;
   const [mode, setMode] = useState<"target" | "budget">("target");
@@ -114,7 +114,8 @@ export default function Planner(props: {
       <section className="card p-4">
         <div className="eyebrow mb-3">Can your income cover it?</div>
         <ul className="text-sm space-y-1.5 num">
-          <Line k="Monthly income" v={income} />
+          <Line k="Planned income" v={income} />
+          <li className="text-[11px] text-muted -mt-1">Based on {props.incomeBasis}. Your pay varies, so treat this as a range.</li>
           <Line k="Fixed costs (rent, utilities…)" v={-otherFixed} />
           <Line k="Recurring subscriptions" v={-recurring} />
           <li className="flex justify-between items-center">
@@ -129,7 +130,7 @@ export default function Planner(props: {
           </li>
         </ul>
         {!income ? (
-          <p className="text-sm text-muted mt-3"><Link href="/settings" className="text-accent underline">Add your income</Link> to see whether this fits.</p>
+          <p className="text-sm text-muted mt-3">File your deposits under an income category (or <Link href="/settings" className="text-accent underline">set a baseline</Link>) to see whether this fits.</p>
         ) : (
           <div className={`mt-3 rounded-xl px-3 py-2.5 text-sm ${gap >= 0 ? "bg-accent-soft text-accent" : "bg-bad-soft text-bad"}`}>
             {gap >= 0

@@ -2,7 +2,7 @@
 
 import { useRef, useState, useTransition } from "react";
 import Link from "next/link";
-import { answerDuplicate, answerRecurring, fileTransaction } from "@/app/actions";
+import { answerDuplicate, answerRecurring, createCategory, fileTransaction } from "@/app/actions";
 import { money } from "@/lib/format";
 
 type CardTx = {
@@ -19,8 +19,14 @@ export type DeckCard =
 const fmtDay = (d: string) =>
   new Date(d + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
 
-export default function SwipeDeck({ initial, categories }: { initial: DeckCard[]; categories: { name: string; kind: string }[] }) {
+type Cat = { name: string; kind: string; taxable?: boolean };
+
+export default function SwipeDeck({ initial, categories }: { initial: DeckCard[]; categories: Cat[] }) {
   const [deck, setDeck] = useState(initial);
+  const [cats, setCats] = useState<Cat[]>(categories);
+  const [query, setQuery] = useState("");
+  const [newKind, setNewKind] = useState<"spend" | "income" | null>(null);
+  const [newTaxable, setNewTaxable] = useState(true);
   const [done, setDone] = useState(0);
   const [, start] = useTransition();
   const top = deck[0];
@@ -54,7 +60,7 @@ export default function SwipeDeck({ initial, categories }: { initial: DeckCard[]
   function advance(later = false) {
     setDeck((d) => (later && d.length > 1 ? [...d.slice(1), d[0]] : d.slice(1)));
     if (!later) setDone((n) => n + 1);
-    setDx(0); setFlying(0); setSel(null);
+    setDx(0); setFlying(0); setSel(null); setQuery(""); setNewKind(null);
   }
 
   function fly(dir: 1 | -1, after: () => void) {
@@ -80,6 +86,26 @@ export default function SwipeDeck({ initial, categories }: { initial: DeckCard[]
     if (top.type === "tx") fly(-1, () => advance(true));
     else if (top.type === "dup") fly(-1, () => { advance(); start(() => answerDuplicate(top.tx.id, false)); });
     else fly(-1, () => { advance(); start(() => answerRecurring(top.merchantKey, false)); });
+  }
+
+  function createAndFile(raw: string) {
+    if (!top || top.type !== "tx" || !current) return;
+    const name = raw.trim().replace(/\s+/g, " ").slice(0, 40);
+    if (!name) return;
+    const kind = newKind ?? (top.tx.amount > 0 ? "income" : "spend");
+    const taxable = kind === "income" && newTaxable;
+    setCats((c) => [...c, { name, kind, taxable }]);
+    const card = top;
+    const { recurring, stupid } = current;
+    fly(1, () => {
+      advance();
+      const changed = recurring !== card.tx.recurring;
+      teach(card.tx.merchantKey, { category: name, ...(changed ? { recurring } : {}) });
+      start(async () => {
+        const real = (await createCategory(name, kind, taxable)) ?? name;
+        await fileTransaction(card.tx.id, real, { recurring: changed ? recurring : undefined, stupid });
+      });
+    });
   }
 
   function pickCategory(name: string) {
@@ -162,14 +188,19 @@ export default function SwipeDeck({ initial, categories }: { initial: DeckCard[]
               Stupid buy
             </button>
           </div>
-          <div className="eyebrow">Tap a category to file</div>
-          <div className="flex flex-wrap gap-2">
-            {categories.map((c) => (
-              <button key={c.name} className="chip" data-on={current.category === c.name} onClick={() => pickCategory(c.name)}>
-                {c.name}
-              </button>
-            ))}
-          </div>
+          <CategoryPicker
+            cats={cats}
+            deposit={top.tx.amount > 0}
+            selected={current.category}
+            query={query}
+            setQuery={setQuery}
+            newKind={newKind ?? (top.tx.amount > 0 ? "income" : "spend")}
+            setNewKind={setNewKind}
+            newTaxable={newTaxable}
+            setNewTaxable={setNewTaxable}
+            onPick={pickCategory}
+            onCreate={createAndFile}
+          />
         </div>
       )}
 
@@ -195,7 +226,7 @@ function TxFace({ tx }: { tx: CardTx }) {
         <div className={`figure text-[48px] leading-none my-2 ${income ? "text-accent" : ""}`}>
           {income ? "+" : ""}{money(Math.abs(tx.amount))}
         </div>
-        <div className="text-sm text-muted">Bought {fmtDay(tx.purchaseDate)}</div>
+        <div className="text-sm text-muted">{income ? "Received" : "Bought"} {fmtDay(tx.purchaseDate)}</div>
       </div>
       <div className="text-[11px] text-muted truncate text-center">{tx.description}</div>
     </div>
@@ -228,6 +259,79 @@ function DupFace({ tx, original }: { tx: CardTx; original: CardTx }) {
         ))}
       </div>
       <p className="text-[11px] text-muted text-center mt-3">Same = keep one, with the original date and category.</p>
+    </div>
+  );
+}
+
+function CategoryPicker(p: {
+  cats: Cat[]; deposit: boolean; selected: string | null; query: string; setQuery: (q: string) => void;
+  newKind: "spend" | "income"; setNewKind: (k: "spend" | "income") => void; newTaxable: boolean; setNewTaxable: (b: boolean) => void;
+  onPick: (name: string) => void; onCreate: (name: string) => void;
+}) {
+  const q = p.query.trim().toLowerCase();
+  const user = p.cats.filter((c) => c.kind !== "transfer");
+  const system = p.cats.filter((c) => c.kind === "transfer");
+  // deposits show income categories first; purchases hide income categories unless you search
+  const ordered = p.deposit
+    ? [...user.filter((c) => c.kind === "income"), ...user.filter((c) => c.kind !== "income")]
+    : user.filter((c) => c.kind !== "income" || q);
+  const shown = q ? [...ordered, ...system].filter((c) => c.name.toLowerCase().includes(q)) : ordered;
+  const exact = p.cats.some((c) => c.name.toLowerCase() === q);
+
+  return (
+    <div className="space-y-3">
+      <div className="eyebrow">{user.length ? "Tap a category, or type a new one" : "Name your first category"}</div>
+      <input
+        className="field"
+        placeholder={p.deposit ? "e.g. Income - Freelance" : "e.g. Food, Commute, Rent share…"}
+        value={p.query}
+        onChange={(e) => p.setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || !q) return;
+          e.preventDefault();
+          const hit = p.cats.find((c) => c.name.toLowerCase() === q);
+          if (hit) p.onPick(hit.name); else p.onCreate(p.query);
+        }}
+        enterKeyHint="done"
+        autoCapitalize="words"
+      />
+
+      {q && !exact && (
+        <div className="rounded-xl border border-dashed border-line p-3 space-y-2">
+          <div className="flex gap-1.5">
+            <button type="button" className="chip !py-1 !text-xs" data-on={p.newKind === "spend"} onClick={() => p.setNewKind("spend")}>Spending</button>
+            <button type="button" className="chip !py-1 !text-xs" data-on={p.newKind === "income"} onClick={() => p.setNewKind("income")}>Income</button>
+            {p.newKind === "income" && (
+              <label className="flex items-center gap-1.5 text-xs text-muted ml-1">
+                <input type="checkbox" checked={p.newTaxable} onChange={(e) => p.setNewTaxable(e.target.checked)} /> Taxes not withheld
+              </label>
+            )}
+          </div>
+          <button type="button" className="btn w-full" onClick={() => p.onCreate(p.query)}>
+            Create &ldquo;{p.query.trim()}&rdquo; and file
+          </button>
+        </div>
+      )}
+
+      {shown.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {shown.map((c) => (
+            <button key={c.name} className="chip" data-on={p.selected === c.name} onClick={() => p.onPick(c.name)}>
+              {c.kind === "income" && <span className="text-accent mr-1">+</span>}
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
+      {!q && (
+        <div className="flex flex-wrap gap-2">
+          {system.map((c) => (
+            <button key={c.name} className="chip !text-xs !py-1 text-muted" data-on={p.selected === c.name} onClick={() => p.onPick(c.name)}>
+              {c.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

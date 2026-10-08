@@ -2,7 +2,7 @@ import "server-only";
 import { db, getSetting, setSetting } from "./db";
 import { decrypt } from "./crypto";
 import { fetchAccounts, type SfAccount, type SfAccountSet, type SfTransaction } from "./simplefin";
-import { looksLikeFee, looksLikeIncome, looksLikeTransfer, merchantKey, prettyMerchant, similarity } from "./merchant";
+import { looksLikeTransfer, merchantKey, prettyMerchant, similarity } from "./merchant";
 import { addDays, dayOf, diffDays, today } from "./dates";
 import { detectRecurring } from "./recurring";
 
@@ -219,10 +219,6 @@ export async function ingest(data: SfAccountSet): Promise<SyncSummary> {
     if (looksLikeTransfer(description)) {
       isTransfer = true; review = "done";
       category = /crd|card|credit|loan|payment thank|applecard|e-payment/i.test(description) ? "Debt Payment" : "Transfer";
-    } else if (!category && amount > 0 && looksLikeIncome(description)) {
-      category = "Income";
-    } else if (!category && amount < 0 && looksLikeFee(description)) {
-      category = "Fees & Interest";
     }
     if (!isTransfer && rule?.category && rule.confirmations >= 3) review = "done"; // learned merchant
     if (dupOf) review = "inbox";

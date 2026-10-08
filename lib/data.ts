@@ -1,13 +1,20 @@
 import "server-only";
 import { db, getSetting } from "./db";
-import { monthBounds, today, monthOf } from "./dates";
+import { monthBounds, monthLabel, shiftMonth, today, monthOf } from "./dates";
 
 export type FixedCost = { name: string; amount: number };
-export type Plan = { monthlyIncome: number; payFrequency: "monthly" | "biweekly" | "semimonthly"; fixedCosts: FixedCost[] };
+export type IncomeMode = "last_month" | "avg3" | "lowest6" | "manual";
+export type Plan = {
+  incomeMode: IncomeMode;
+  manualIncome: number; // baseline you're confident in (used for "manual", and as a fallback before there's history)
+  taxPct: number; // % of untaxed (1099) income to set aside
+  fixedCosts: FixedCost[];
+};
 
 export const DEFAULT_PLAN: Plan = {
-  monthlyIncome: 0,
-  payFrequency: "monthly",
+  incomeMode: "avg3",
+  manualIncome: 0,
+  taxPct: 25,
   fixedCosts: [
     { name: "Rent", amount: 0 },
     { name: "Utilities", amount: 0 },
@@ -16,7 +23,10 @@ export const DEFAULT_PLAN: Plan = {
 };
 
 export async function getPlan(): Promise<Plan> {
-  return { ...DEFAULT_PLAN, ...(await getSetting<Partial<Plan>>("plan", {})) };
+  const saved = await getSetting<Partial<Plan> & { monthlyIncome?: number }>("plan", {});
+  const plan = { ...DEFAULT_PLAN, ...saved };
+  if (!saved.manualIncome && saved.monthlyIncome) plan.manualIncome = saved.monthlyIncome; // older saves
+  return plan;
 }
 
 export type Account = {
@@ -31,10 +41,83 @@ export async function getAccounts() {
     case kind when 'checking' then 1 when 'savings' then 2 when 'credit' then 3 when 'loan' then 4 else 5 end, name`;
 }
 
-export type Category = { name: string; grp: string; budget: number; sort: number; kind: string };
+export type Category = { name: string; grp: string; budget: number; sort: number; kind: string; taxable: boolean };
 export async function getCategories() {
   const sql = await db();
-  return sql<Category[]>`select * from categories order by sort, name`;
+  return sql<Category[]>`select * from categories order by kind = 'transfer', kind, name`;
+}
+
+type MonthTotals = { income: number; taxable: number; discretionary: number };
+
+/** Per-month income and everyday spending, by purchase date. */
+export async function monthlyTotals(fromMonth: string, toMonthExclusive: string) {
+  const sql = await db();
+  const rows = await sql<{ month: string; income: number; taxable: number; discretionary: number }[]>`
+    select to_char(t.purchase_date, 'YYYY-MM') as month,
+      coalesce(sum(t.amount) filter (where c.kind = 'income'), 0)::numeric as income,
+      coalesce(sum(t.amount) filter (where c.kind = 'income' and c.taxable), 0)::numeric as taxable,
+      coalesce(sum(-t.amount) filter (where coalesce(c.kind, 'spend') = 'spend' and not t.is_recurring), 0)::numeric as discretionary
+    from transactions t left join categories c on c.name = t.category
+    where t.purchase_date >= ${fromMonth + "-01"} and t.purchase_date < ${toMonthExclusive + "-01"}
+      and t.merged_into is null and t.status <> 'dropped' and not t.is_transfer and t.possible_dup_of is null
+    group by 1`;
+  const out = new Map<string, MonthTotals>();
+  for (const r of rows) out.set(r.month, { income: r.income, taxable: r.taxable, discretionary: r.discretionary });
+  return out;
+}
+
+async function firstDataMonth() {
+  const sql = await db();
+  const [r] = await sql<{ d: string | null }[]>`select min(purchase_date)::text d from transactions where merged_into is null`;
+  return r?.d ? r.d.slice(0, 7) : null;
+}
+
+export type IncomePicture = {
+  planningIncome: number; // after tax set-aside
+  basis: string; // human explanation
+  history: { month: string; net: number; gross: number }[]; // newest first, full months only
+  avgDiscretionary: number;
+};
+
+/** Works out what income to plan a month around when pay is irregular. */
+export async function getIncomePicture(month: string, plan: Plan): Promise<IncomePicture> {
+  const first = await firstDataMonth();
+  const prior = [1, 2, 3, 4, 5, 6].map((n) => shiftMonth(month, -n));
+  const totals = await monthlyTotals(prior[5], month);
+  // only count months fully covered by your data (SimpleFIN goes back ~90 days)
+  const covered = prior.filter((m) => first && m > first);
+  const history = covered.map((m) => {
+    const t = totals.get(m) ?? { income: 0, taxable: 0, discretionary: 0 };
+    return { month: m, gross: t.income, net: t.income - (t.taxable * plan.taxPct) / 100 };
+  });
+  const spendMonths = covered.slice(0, 3).map((m) => totals.get(m)?.discretionary ?? 0);
+  const avgDiscretionary = spendMonths.length ? spendMonths.reduce((a, b) => a + b, 0) / spendMonths.length : 0;
+
+  const fallback = (why: string): IncomePicture => ({
+    planningIncome: plan.manualIncome,
+    basis: plan.manualIncome ? `your baseline (${why})` : `nothing yet (${why}); set a baseline in Settings`,
+    history, avgDiscretionary,
+  });
+
+  if (plan.incomeMode === "manual") return { planningIncome: plan.manualIncome, basis: "your baseline", history, avgDiscretionary };
+  if (!history.length) return fallback("not enough history");
+  const lbl = (m: string) => monthLabel(m).split(" ")[0];
+  if (plan.incomeMode === "last_month") {
+    return { planningIncome: history[0].net, basis: `what you earned in ${lbl(history[0].month)}`, history, avgDiscretionary };
+  }
+  if (plan.incomeMode === "lowest6") {
+    const low = history.reduce((a, b) => (b.net < a.net ? b : a));
+    return { planningIncome: low.net, basis: `your leanest month (${lbl(low.month)})`, history, avgDiscretionary };
+  }
+  const last3 = history.slice(0, 3);
+  if (last3.length === 1) {
+    return { planningIncome: last3[0].net, basis: `${lbl(last3[0].month)} (only full month so far)`, history, avgDiscretionary };
+  }
+  return {
+    planningIncome: last3.reduce((s, h) => s + h.net, 0) / last3.length,
+    basis: `your ${last3.length}-month average`,
+    history, avgDiscretionary,
+  };
 }
 
 export type Tx = {
@@ -64,8 +147,13 @@ export async function getRecurring(month: string): Promise<RecurringItem[]> {
 
 export type MonthSummary = {
   month: string;
-  plannedIncome: number;
-  actualIncome: number;
+  plannedIncome: number; // what this month is budgeted around (after tax set-aside)
+  incomeBasis: string;
+  actualIncome: number; // earned so far this month (gross)
+  taxSetAside: number; // this month
+  avgDiscretionary: number;
+  monthlyBurn: number; // fixed + recurring + typical everyday spending
+  incomeHistory: { month: string; net: number; gross: number }[];
   fixedTotal: number;
   recurringTotal: number;
   allowance: number; // income - fixed - recurring
@@ -92,13 +180,18 @@ export async function getMonthSummary(month = monthOf(today())): Promise<MonthSu
       and merged_into is null and status <> 'dropped' and not is_transfer`;
   const recurring = await getRecurring(month);
 
+  let taxable = 0;
   let actualIncome = 0, discretionary = 0, recurringSpent = 0, pendingTotal = 0, pendingCount = 0, uncategorized = 0;
   const byCat = new Map<string, { spent: number; count: number }>();
   for (const t of txs) {
     if (t.possible_dup_of) continue; // waiting on a "Same purchase?" answer; don't double count
     const kind = t.category ? kindOf.get(t.category) ?? "spend" : "spend";
     if (kind === "transfer") continue;
-    if (kind === "income") { actualIncome += t.amount; continue; }
+    if (kind === "income") {
+      actualIncome += t.amount;
+      if (cats.find((c) => c.name === t.category)?.taxable) taxable += t.amount;
+      continue;
+    }
     const spend = -t.amount; // refunds come through as negative spend
     if (t.status === "pending" && t.amount < 0) { pendingTotal += spend; pendingCount++; }
     const key = t.category ?? "Uncategorized";
@@ -113,7 +206,11 @@ export async function getMonthSummary(month = monthOf(today())): Promise<MonthSu
 
   const fixedTotal = plan.fixedCosts.reduce((s, f) => s + (Number(f.amount) || 0), 0);
   const recurringTotal = recurring.reduce((s, r) => s + r.amount, 0);
-  const plannedIncome = plan.monthlyIncome || actualIncome;
+  const pic = await getIncomePicture(month, plan);
+  const taxSetAside = (taxable * plan.taxPct) / 100;
+  // never plan on less than you've already brought in this month
+  const plannedIncome = Math.max(pic.planningIncome, actualIncome - taxSetAside);
+  const incomeBasis = plannedIncome > pic.planningIncome ? "what you've earned so far this month" : pic.basis;
   const allowance = plannedIncome - fixedTotal - recurringTotal;
   const safeToSpend = allowance - discretionary;
   const isCurrent = month === monthOf(today());
@@ -128,7 +225,9 @@ export async function getMonthSummary(month = monthOf(today())): Promise<MonthSu
     .sort((a, b) => b.spent - a.spent);
 
   return {
-    month, plannedIncome, actualIncome, fixedTotal, recurringTotal, allowance, discretionary, recurringSpent,
+    month, plannedIncome, incomeBasis, actualIncome, taxSetAside, avgDiscretionary: pic.avgDiscretionary,
+    monthlyBurn: fixedTotal + recurringTotal + (pic.avgDiscretionary || (discretionary / Math.max(1, dayOfMonth)) * days),
+    incomeHistory: pic.history, fixedTotal, recurringTotal, allowance, discretionary, recurringSpent,
     safeToSpend, perDayLeft: safeToSpend / daysLeft, dayOfMonth, daysInMonth: days, pendingTotal, pendingCount,
     byCategory, uncategorized,
   };

@@ -91,6 +91,7 @@ const SCHEMA: string[] = [
      created_at timestamptz not null default now(),
      updated_at timestamptz not null default now()
    )`,
+  `alter table categories add column if not exists taxable boolean not null default false`,
   `create index if not exists tx_purchase_date on transactions (purchase_date)`,
   `create index if not exists tx_review on transactions (review)`,
   `create index if not exists tx_merchant on transactions (merchant_key)`,
@@ -116,39 +117,18 @@ const SCHEMA: string[] = [
    )`,
 ];
 
-// Starting categories, modeled on the "Budget Bible" spreadsheet.
-const DEFAULT_CATEGORIES: [string, string, number, string][] = [
-  ["FoodBev", "Food", 1, "spend"],
-  ["Groceries", "Food", 2, "spend"],
-  ["Car - Commute", "Car", 10, "spend"],
-  ["Car - Maintenance", "Car", 11, "spend"],
-  ["Transit", "Transit", 20, "spend"],
-  ["Living - Apartment", "Living", 30, "spend"],
-  ["Living - Rent", "Living", 31, "fixed"],
-  ["Living - Utilities", "Living", 32, "fixed"],
-  ["Pet", "Pet", 40, "spend"],
-  ["Personal - Shopping", "Personal", 50, "spend"],
-  ["Personal - SelfCare", "Personal", 51, "spend"],
-  ["Personal - Entertainment", "Personal", 52, "spend"],
-  ["Personal - Gift", "Personal", 53, "spend"],
-  ["Personal - Travel", "Personal", 54, "spend"],
-  ["Subscriptions", "Personal", 55, "spend"],
-  ["Fees & Interest", "Fees", 60, "spend"],
-  ["Debt Payment", "Debt", 70, "fixed"],
-  ["Income", "Income", 80, "income"],
-  ["Transfer", "Transfer", 90, "transfer"],
-  ["Other", "Other", 99, "spend"],
+// Only the two built-in categories the sync engine relies on. Everything else you create as you go.
+const SYSTEM_CATEGORIES: [string, string, number, string][] = [
+  ["Debt Payment", "System", 900, "transfer"],
+  ["Transfer", "System", 901, "transfer"],
 ];
 
 async function migrate() {
   const sql = client();
   await sql`create extension if not exists pgcrypto`.catch(() => {});
   for (const stmt of SCHEMA) await sql.unsafe(stmt);
-  const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from categories`;
-  if (n === 0) {
-    for (const [name, grp, sort, kind] of DEFAULT_CATEGORIES) {
-      await sql`insert into categories (name, grp, sort, kind) values (${name}, ${grp}, ${sort}, ${kind}) on conflict do nothing`;
-    }
+  for (const [name, grp, sort, kind] of SYSTEM_CATEGORIES) {
+    await sql`insert into categories (name, grp, sort, kind) values (${name}, ${grp}, ${sort}, ${kind}) on conflict do nothing`;
   }
 }
 

@@ -43,7 +43,8 @@ export default async function PayoffPage() {
       ) : (
         <Planner
           debts={debts}
-          income={plan.monthlyIncome}
+          income={current.plannedIncome}
+          incomeBasis={current.incomeBasis}
           otherFixed={otherFixed}
           recurring={current.recurringTotal}
           avgSpending={Math.round(avgDiscretionary)}

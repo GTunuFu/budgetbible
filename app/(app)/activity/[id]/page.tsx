@@ -42,10 +42,10 @@ export default async function EditTx({ params }: { params: Promise<{ id: string 
           </>
         )}
         <Field label="Category">
-          <select name="category" className="field" defaultValue={t.category ?? ""}>
-            <option value="">— Needs a category —</option>
-            {cats.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-          </select>
+          <>
+            <input name="category" list="cats" className="field" defaultValue={t.category ?? undefined} placeholder="Pick or type a new one" autoComplete="off" />
+            <datalist id="cats">{cats.filter((c) => c.kind !== "transfer").map((c) => <option key={c.name} value={c.name} />)}<option value="Transfer" /><option value="Debt Payment" /></datalist>
+          </>
         </Field>
         <Field label="Purchase date (what the budget uses)">
           <input type="date" name="purchase_date" className="field" defaultValue={t.purchase_date} />

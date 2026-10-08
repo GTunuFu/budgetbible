@@ -108,7 +108,8 @@ export async function fileTransaction(id: string, category: string, opts: { recu
   let tags = tx.tags.filter((t) => t !== "stupid");
   if (opts.stupid) tags = [...tags, "stupid"];
   const recurring = opts.recurring ?? tx.is_recurring;
-  const isTransfer = category === "Transfer" || category === "Debt Payment";
+  category = (await ensureCategory(category)) ?? category;
+  const isTransfer = SYSTEM.has(category);
   await sql`update transactions set category = ${category}, tags = ${tags}, is_recurring = ${recurring},
             is_transfer = ${isTransfer}, review = 'done', possible_dup_of = null, updated_at = now() where id = ${id}`;
   await learn(tx.merchant_key, category, opts.recurring === undefined ? null : opts.recurring);
@@ -158,7 +159,7 @@ export async function setRecurring(key: string, yes: boolean) {
 export async function updateTransaction(id: string, form: FormData) {
   await requireAuth();
   const sql = await db();
-  const category = String(form.get("category") || "") || null;
+  const rawCat = String(form.get("category") || "").trim();
   const purchaseDate = String(form.get("purchase_date") || "");
   const notes = String(form.get("notes") || "") || null;
   const recurring = form.get("recurring") === "on";
@@ -168,9 +169,10 @@ export async function updateTransaction(id: string, form: FormData) {
   const [tx] = await sql<{ source: string; merchant_key: string; tags: string[]; amount: number }[]>`
     select source, merchant_key, tags, amount from transactions where id = ${id}`;
   if (!tx) redirect("/activity");
+  const category = rawCat ? await ensureCategory(rawCat, tx.amount > 0 ? "income" : "spend") : null;
   const tags = [...tx.tags.filter((t) => t !== "stupid"), ...(stupid ? ["stupid"] : [])];
   await sql`update transactions set category = ${category}, notes = ${notes}, is_recurring = ${recurring}, tags = ${tags},
-            is_transfer = ${category === "Transfer" || category === "Debt Payment"},
+            is_transfer = ${category ? SYSTEM.has(category) : false},
             review = case when ${category}::text is null then review else 'done' end, possible_dup_of = null,
             purchase_date = coalesce(nullif(${purchaseDate}, '')::date, purchase_date), updated_at = now()
             where id = ${id}`;
@@ -190,7 +192,8 @@ export async function addManualTransaction(form: FormData) {
   const amount = num(form.get("amount"));
   if (!description || amount == null) redirect("/activity/new?error=1");
   const isIncome = form.get("is_income") === "on";
-  const category = String(form.get("category") || "") || null;
+  const rawCat = String(form.get("category") || "").trim();
+  const category = rawCat ? await ensureCategory(rawCat, isIncome ? "income" : "spend") : null;
   const accountId = String(form.get("account_id") || "") || null;
   const day = String(form.get("purchase_date") || today());
   const key = merchantKey(description);
@@ -221,41 +224,85 @@ export async function savePlan(form: FormData) {
   const names = form.getAll("fixed_name").map(String);
   const amounts = form.getAll("fixed_amount").map((v) => num(v) ?? 0);
   const fixedCosts: FixedCost[] = names.map((name, i) => ({ name: name.trim(), amount: amounts[i] })).filter((f) => f.name);
+  const modes = ["last_month", "avg3", "lowest6", "manual"];
+  const mode = String(form.get("income_mode"));
   const plan: Plan = {
     ...(await getPlan()),
-    monthlyIncome: num(form.get("income")) ?? 0,
-    payFrequency: (String(form.get("pay_frequency")) as Plan["payFrequency"]) || "monthly",
+    incomeMode: (modes.includes(mode) ? mode : "avg3") as Plan["incomeMode"],
+    manualIncome: num(form.get("manual_income")) ?? 0,
+    taxPct: Math.min(60, Math.max(0, num(form.get("tax_pct")) ?? 0)),
     fixedCosts,
   };
   await setSetting("plan", plan);
   refreshAll();
 }
 
-export async function saveBudgets(form: FormData) {
-  await requireAuth();
+const SYSTEM = new Set(["Transfer", "Debt Payment"]);
+
+/** Creates a category if it doesn't exist yet. Returns the canonical name (case-insensitive match). */
+async function ensureCategory(raw: string, kind: "spend" | "income" = "spend", taxable = false) {
+  const name = raw.trim().replace(/\s+/g, " ").slice(0, 40);
+  if (!name) return null;
   const sql = await db();
-  for (const [k, v] of form.entries()) {
-    if (!k.startsWith("budget:")) continue;
-    await sql`update categories set budget = ${num(v) ?? 0} where name = ${k.slice(7)}`;
-  }
+  const [hit] = await sql<{ name: string }[]>`select name from categories where lower(name) = lower(${name})`;
+  if (hit) return hit.name;
+  const grp = name.includes(" - ") ? name.split(" - ")[0].trim() : name;
+  await sql`insert into categories (name, grp, kind, taxable) values (${name}, ${grp}, ${kind}, ${kind === "income" && taxable})
+            on conflict do nothing`;
+  return name;
+}
+
+export async function createCategory(name: string, kind: "spend" | "income", taxable = false) {
+  await requireAuth();
+  const n = await ensureCategory(name, kind, taxable);
   refreshAll();
+  return n;
 }
 
 export async function addCategory(form: FormData) {
   await requireAuth();
+  const kind = form.get("kind") === "income" ? "income" : "spend";
+  await ensureCategory(String(form.get("name") || ""), kind, form.get("taxable") === "on");
+  refreshAll();
+}
+
+export async function saveCategories(form: FormData) {
+  await requireAuth();
   const sql = await db();
-  const name = String(form.get("name") || "").trim();
-  if (!name) return;
-  const grp = name.includes(" - ") ? name.split(" - ")[0] : name;
-  await sql`insert into categories (name, grp, budget, sort, kind) values (${name}, ${grp}, ${num(form.get("budget")) ?? 0}, 75, 'spend')
-            on conflict do nothing`;
+  const names = form.getAll("cat").map(String);
+  for (const name of names) {
+    if (SYSTEM.has(name)) continue;
+    const budget = num(form.get(`budget:${name}`)) ?? 0;
+    const kind = form.get(`kind:${name}`) === "income" ? "income" : "spend";
+    const taxable = kind === "income" && form.get(`taxable:${name}`) === "on";
+    await sql`update categories set budget = ${kind === "income" ? 0 : budget}, kind = ${kind}, taxable = ${taxable} where name = ${name}`;
+    const rename = String(form.get(`rename:${name}`) || "").trim().replace(/\s+/g, " ").slice(0, 40);
+    if (rename && rename !== name && !SYSTEM.has(rename)) {
+      const [clash] = await sql`select 1 from categories where lower(name) = lower(${rename}) and name <> ${name}`;
+      if (clash) {
+        // merging into an existing category
+        await sql`update transactions set category = ${rename} where category = ${name}`;
+        await sql`update merchant_rules set category = ${rename} where category = ${name}`;
+        await sql`delete from categories where name = ${name}`;
+      } else {
+        const grp = rename.includes(" - ") ? rename.split(" - ")[0].trim() : rename;
+        await sql`update categories set name = ${rename}, grp = ${grp} where name = ${name}`;
+        await sql`update transactions set category = ${rename} where category = ${name}`;
+        await sql`update merchant_rules set category = ${rename} where category = ${name}`;
+      }
+    }
+  }
   refreshAll();
 }
 
 export async function deleteCategory(name: string) {
   await requireAuth();
+  if (SYSTEM.has(name)) return;
   const sql = await db();
-  await sql`delete from categories where name = ${name} and kind = 'spend'`;
+  // anything filed here goes back to the review pile
+  await sql`update transactions set category = null, review = 'inbox' where category = ${name}`;
+  await sql`update merchant_rules set category = null, confirmations = 0 where category = ${name}`;
+  await sql`delete from categories where name = ${name}`;
   refreshAll();
 }
 

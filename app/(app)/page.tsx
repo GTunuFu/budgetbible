@@ -1,12 +1,12 @@
 import Link from "next/link";
-import { getAccounts, getInboxCount, getMonthSummary, getPlan, getRecurring, money } from "@/lib/data";
+import { getAccounts, getCategories, getInboxCount, getMonthSummary, getPlan, getRecurring, money } from "@/lib/data";
 import { getSetting } from "@/lib/db";
 import { monthLabel, monthOf, today } from "@/lib/dates";
 import SyncButton from "@/components/SyncButton";
 
 export default async function Home() {
   const month = monthOf(today());
-  const [m, accounts, inbox, plan, recurring, lastSync, access] = await Promise.all([
+  const [m, accounts, inbox, plan, recurring, lastSync, access, cats] = await Promise.all([
     getMonthSummary(month),
     getAccounts(),
     getInboxCount(),
@@ -14,6 +14,7 @@ export default async function Home() {
     getRecurring(month),
     getSetting<string | null>("last_sync_at", null),
     getSetting<string | null>("simplefin_access", null),
+    getCategories(),
   ]);
 
   const visible = accounts.filter((a) => !a.hidden);
@@ -26,7 +27,11 @@ export default async function Home() {
   const daysLeft = m.daysInMonth - m.dayOfMonth + 1;
   const overPace = used > elapsed + 0.05;
   const upcoming = recurring.filter((r) => !r.chargedThisMonth);
-  const needsSetup = !plan.monthlyIncome;
+  const needsBills = !plan.fixedCosts.some((f) => f.amount > 0);
+  const needsIncome = !cats.some((c) => c.kind === "income");
+  const needsSetup = needsBills || needsIncome;
+  const runway = m.monthlyBurn > 0 ? cash / m.monthlyBurn : null;
+  const covered = m.monthlyBurn > 0 ? Math.min(1, (m.actualIncome - m.taxSetAside) / m.monthlyBurn) : 0;
 
   return (
     <main className="space-y-4">
@@ -48,7 +53,8 @@ export default async function Home() {
           <div className="font-semibold">Finish setting up</div>
           <ol className="text-sm text-muted space-y-1 list-decimal pl-5">
             {!access && <li><Link className="text-accent underline" href="/accounts">Connect SimpleFIN</Link> to pull your banks and cards.</li>}
-            {needsSetup && <li><Link className="text-accent underline" href="/settings">Enter your monthly income and fixed costs.</Link></li>}
+            {needsBills && <li><Link className="text-accent underline" href="/settings">Enter your monthly bills</Link> (rent, utilities, debt).</li>}
+            {needsIncome && <li>When a payment comes in, file it under a new <b>income</b> category on its swipe card (e.g. &ldquo;Income - Freelance&rdquo;). Your budget is built from real deposits.</li>}
           </ol>
         </div>
       )}
@@ -62,7 +68,9 @@ export default async function Home() {
         <div className="text-sm text-muted mt-2">
           {m.safeToSpend > 0
             ? <>About <span className="text-ink font-medium num">{money(m.perDayLeft, { cents: false })}/day</span> for the next {daysLeft} days</>
-            : <>You&apos;re past this month&apos;s allowance by {money(-m.safeToSpend, { cents: false })}</>}
+            : m.allowance < 0
+              ? <>Bills and subscriptions are {money(-m.allowance, { cents: false })} more than planned income, so there&apos;s nothing free to spend yet</>
+              : <>You&apos;re past this month&apos;s allowance by {money(-m.safeToSpend, { cents: false })}</>}
         </div>
 
         <div className="mt-5">
@@ -78,11 +86,40 @@ export default async function Home() {
           </div>
         </div>
 
-        <dl className="grid grid-cols-3 gap-2 mt-5 pt-4 border-t border-line text-sm">
-          <Stat label="Income" value={m.plannedIncome} />
-          <Stat label="Fixed" value={-m.fixedTotal} />
+        <div className="text-xs text-muted mt-3">
+          Planned on <span className="text-ink">{m.incomeBasis}</span>: <span className="num">{money(m.plannedIncome, { cents: false })}</span>
+        </div>
+        <dl className="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-line text-sm">
+          <Stat label="Planned income" value={m.plannedIncome} />
+          <Stat label="Bills" value={-m.fixedTotal} />
           <Stat label="Recurring" value={-m.recurringTotal} />
         </dl>
+      </section>
+
+      {/* Irregular income: what's come in vs what the month costs */}
+      <section className="card p-4">
+        <div className="flex justify-between items-baseline">
+          <div className="eyebrow">Earned this month</div>
+          {runway != null && (
+            <div className="text-xs text-muted">
+              Runway <span className={`font-semibold num ${runway < 2 ? "text-bad" : runway < 4 ? "text-warn" : "text-ink"}`}>{runway.toFixed(1)} mo</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-baseline gap-2 mt-1">
+          <span className="figure text-3xl">{money(m.actualIncome, { cents: false })}</span>
+          <span className="text-sm text-muted num">of {money(m.monthlyBurn, { cents: false })} the month costs</span>
+        </div>
+        <div className="h-2 rounded-full bg-line mt-3 overflow-hidden">
+          <div className="h-full rounded-full bg-accent" style={{ width: `${covered * 100}%` }} />
+        </div>
+        <div className="flex justify-between text-xs text-muted mt-2 num">
+          <span>{covered >= 1 ? "Month covered ✓" : `${money(Math.max(0, m.monthlyBurn - m.actualIncome + m.taxSetAside), { cents: false })} to go`}</span>
+          {m.taxSetAside > 0 && <span>Set aside for taxes: <b className="text-ink">{money(m.taxSetAside, { cents: false })}</b></span>}
+        </div>
+        {runway != null && (
+          <p className="text-[11px] text-muted mt-2">Runway = cash in checking + savings ÷ a typical month (bills, subscriptions, everyday spending).</p>
+        )}
       </section>
 
       {inbox > 0 && (
